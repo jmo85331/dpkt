@@ -28,6 +28,10 @@ M_DISASSOC = 10
 M_AUTH = 11
 M_DEAUTH = 12
 M_ACTION = 13
+M_ACTION_NO_ACK = 14
+C_BEAMFORM_RPT_POLL = 4
+C_VHT_NDP_ANNOUNCE = 5
+C_WRAPPER = 7
 C_BLOCK_ACK_REQ = 8
 C_BLOCK_ACK = 9
 C_PS_POLL = 10
@@ -292,7 +296,8 @@ class IEEE80211(dpkt.Packet):
             M_AUTH: ('auth', self.Auth),
             M_PROBE_RESP: ('probe_resp', self.Beacon),
             M_DEAUTH: ('deauth', self.Deauth),
-            M_ACTION: ('action', self.Action)
+            M_ACTION: ('action', self.Action),
+            M_ACTION_NO_ACK: ('action_noack', self.ActionNoAck)
         }
 
         c_decoder = {
@@ -302,6 +307,10 @@ class IEEE80211(dpkt.Packet):
             C_BLOCK_ACK_REQ: ('bar', self.BlockAckReq),
             C_BLOCK_ACK: ('back', self.BlockAck),
             C_CF_END: ('cf_end', self.CFEnd),
+            C_BEAMFORM_RPT_POLL: ('bf_poll', self.BeamFormReportPoll),
+            C_VHT_NDP_ANNOUNCE: ('vht_ndp', self.VhtNdpAnnounce),
+            C_WRAPPER: ('wrapper', self.Wrapper),
+            C_PS_POLL: ('ps_poll', self.PowerSavePoll)
         }
 
         d_dsData = {
@@ -353,6 +362,10 @@ class IEEE80211(dpkt.Packet):
             parser = parser[self.to_ds * 10 + self.from_ds]
 
         if self.type == MGMT_TYPE:
+            if self.wep:
+                # Encrypted frame so there's not much to do with it
+                self.wep_vector = struct.unpack('Q', self.mgmt.data[:8])[0]
+                return
             field = parser(self.mgmt.data)
         else:
             field = parser(self.data)
@@ -360,7 +373,7 @@ class IEEE80211(dpkt.Packet):
 
         setattr(self, name, field)
 
-        if self.type == MGMT_TYPE:
+        if self.type == MGMT_TYPE and self.subtype != M_ACTION_NO_ACK:
             self.unpack_ies(field.data)
             if self.subtype in FRAMES_WITH_CAPABILITY:
                 self.capability = self.Capability(socket.ntohs(field.capability))
@@ -368,6 +381,12 @@ class IEEE80211(dpkt.Packet):
         if self.type == DATA_TYPE and self.subtype == D_QOS_DATA:
             self.qos_data = self.QoS_Data(field.data)
             field.data = self.qos_data.data
+
+        if self.type == CTL_TYPE and self.subtype == C_VHT_NDP_ANNOUNCE:
+            self.sta_list = []
+            while len(field.data):
+                self.sta_list.append(struct.unpack('H', field.data)[0])
+                field.data = field.data[2:]
 
         self.data = field.data
 
@@ -450,6 +469,32 @@ class IEEE80211(dpkt.Packet):
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
+        )
+
+    class BeamFormReportPoll(dpkt.Packet):
+        __hdr__ = (
+            ('dst', '6s', '\x00' * 6),
+            ('src', '6s', '\x00' * 6),
+            ('fb_seg', 'B', 0)
+        )
+
+    class VhtNdpAnnounce(dpkt.Packet):
+        __hdr__ = (
+            ('dst', '6s', '\x00' * 6),
+            ('src', '6s', '\x00' * 6),
+            ('sd_token', 'B', 0)
+        )
+
+    class Wrapper(dpkt.Packet):
+        __hdr__ = (
+            ('dst', '6s', '\x00' * 6),
+            ('ht_ctl', 'I', 0)
+        )
+
+    class PowerSavePoll(dpkt.Packet):
+        __hdr__ = (
+            ('dst', '6s', '\x00' * 6),
+            ('src', '6s', '\x00' * 6)
         )
 
     class MGMT_Frame(dpkt.Packet):
@@ -544,6 +589,34 @@ class IEEE80211(dpkt.Packet):
             ('status_code', 'H', 0),
             ('parameters', 'H', 0),
             ('timeout', 'H', 0),
+        )
+
+    class ActionNoAck(dpkt.Packet):
+        __hdr__ = (
+            ('category', 'B', 0),
+            ('action', 'B', 0)
+        )
+
+        def unpack(self, buf):
+            dpkt.Packet.unpack(self, buf)
+
+            action_parser = {
+
+            }
+            decoder = None
+            field_name = ""
+            if self.category == 21 and self.action == 0:     # VHT Compressed Beamforming
+                decoder = IEEE80211.VhtCompressedBeamforming
+                field_name = "vht_beamforming_report"
+
+            if decoder is not None:
+                field = decoder(self.data)
+                setattr(self, field_name, field)
+                self.data = field.data
+
+    class VhtCompressedBeamforming(dpkt.Packet):
+        __hdr__ = (
+            ('control', 'BBB', b'\x00' * 3),
         )
 
     class Data(dpkt.Packet):
